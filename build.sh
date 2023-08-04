@@ -7,4 +7,4 @@ else
 	release="-g -O0"
 fi
 
-c99 *.c -o zpartprobe -Wall -Werror $release -pedantic -Wextra
+c99 zpartprobe.c -o zpartprobe -Wall -Werror $release -pedantic -Wextra
