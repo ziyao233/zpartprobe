@@ -10,8 +10,11 @@
 #include<stdint.h>
 #include<string.h>
 
+#include<errno.h>
 #include<fcntl.h>
 #include<unistd.h>
+#include<sys/ioctl.h>
+#include<linux/blkpg.h>
 
 #define MBR_SECTOR_SIZE 512
 #define MBR_PART_TYPE_UNUSED	0x00
@@ -63,7 +66,42 @@ get_disk_type(const uint8_t *lba1)
 }
 
 static int
-mbr_parse_one_table(int disk, uint32_t sectorIndex, int partNo)
+commit_clear_partitions(int disk)
+{
+	// There should be no more than 128 partitions, right?
+	// ...right?
+	struct blkpg_partition part = { .pno		= 1 };
+	struct blkpg_ioctl_arg arg = {
+					.op		= BLKPG_DEL_PARTITION,
+					.datalen	= sizeof(part),
+					.data		= &part
+				     };
+	for (int i = 1; i <= 128; i++) {
+		part.pno = i;
+		ioctl(disk, BLKPG, &arg);
+	}
+
+	return 0;
+}
+
+static int
+commit_add_partition(int disk, int no, long long int start, long long int size)
+{
+	struct blkpg_partition part = {
+					.pno	= no,
+					.start	= start,
+					.length	= size,
+				      };
+	struct blkpg_ioctl_arg arg = {
+					.op		= BLKPG_ADD_PARTITION,
+					.datalen	= sizeof(part),
+					.data		= &part,
+				     };
+	return ioctl(disk, BLKPG, &arg);
+}
+
+static int
+mbr_parse_one_table_and_commit(int disk, uint32_t sectorIndex, int partNo)
 {
 	MBRPartition table[4];
 	read_range(disk, table, sectorIndex * MBR_SECTOR_SIZE + 446, 64);
@@ -77,10 +115,19 @@ mbr_parse_one_table(int disk, uint32_t sectorIndex, int partNo)
 		       i + partNo,
 		       table[i].startSector + sectorIndex, table[i].sectorNum);
 
+		int ret = commit_add_partition(disk, partNo + i,
+				table[i].startSector * MBR_SECTOR_SIZE,
+				table[i].sectorNum * MBR_SECTOR_SIZE);
+		check(!ret,
+		      "Cannot commit partition information to kernel: %s\n",
+		      strerror(errno));
+
 		if (table[i].type == MBR_PART_TYPE_EXTEND0 ||
 		    table[i].type == MBR_PART_TYPE_EXTEND1) {
-			lastPart = mbr_parse_one_table(disk, table[i].startSector,
-						       lastPart);
+			lastPart =
+				mbr_parse_one_table_and_commit
+					(disk, table[i].startSector,
+					 lastPart);
 			if (lastPart < 0)
 				return lastPart;
 		}
@@ -89,16 +136,18 @@ mbr_parse_one_table(int disk, uint32_t sectorIndex, int partNo)
 }
 
 static int
-parse_mbr_parttable(int disk)
+parse_mbr_parttable_and_commit(int disk)
 {
-	return mbr_parse_one_table(disk, 0, 1) < 0;
+	return mbr_parse_one_table_and_commit(disk, 0, 1) < 0;
 }
 
 static int
-parse_partition_table(int disk, PartTable_Type type)
+parse_partition_table_and_commit(int disk, PartTable_Type type)
 {
+	check(!commit_clear_partitions(disk),
+	      "Cannot delete existing partition information from kernel.\n");
 	if (type == PARTTABLE_MBR) {
-		return parse_mbr_parttable(disk);
+		return parse_mbr_parttable_and_commit(disk);
 	} else {
 		perr("Unsupportd partition table type %d\n", type);
 		return -1;
@@ -118,7 +167,7 @@ probe_partition(const char *path)
 	PartTable_Type type = get_disk_type(lba1);
 	free(lba1);
 
-	check(!parse_partition_table(disk, type),
+	check(!parse_partition_table_and_commit(disk, type),
 	      "Failed to parse the partition table\n");
 
 	check(!close(disk), "Cannot close disk %s\n", path);
