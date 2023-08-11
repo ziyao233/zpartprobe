@@ -15,6 +15,7 @@
 #include<unistd.h>
 #include<sys/ioctl.h>
 #include<linux/blkpg.h>
+#include<linux/fs.h>
 
 #define MBR_SECTOR_SIZE 512
 #define MBR_PART_TYPE_UNUSED	0x00
@@ -30,12 +31,38 @@ typedef enum {
 #pragma pack(push, 1)
 
 typedef struct {
-	uint8_t reserved1[4];
-	uint8_t type;
-	uint8_t reserved2[3];
-	uint32_t startSector;
-	uint32_t sectorNum;
+	uint8_t		reserved1[4];
+	uint8_t		type;
+	uint8_t		reserved2[3];
+	uint32_t	startSector;
+	uint32_t	sectorNum;
 } MBRPartition;
+
+typedef struct {
+	uint8_t		sign[8];
+	uint8_t 	rev[4];
+	uint32_t	headerSize;
+	uint32_t	headerCRC32;
+	uint8_t		reserved[4];
+	uint64_t	current;
+	uint64_t	backup;
+	uint64_t	spaceStart;
+	uint64_t	spaceEnd;
+	uint8_t		guid[16];
+	uint64_t	parttableStart;
+	uint32_t	partNum;
+	uint32_t	partItemSize;
+	uint32_t	tableCRC32;
+} GPTHeader;
+
+typedef struct {
+	uint8_t		type[16];
+	uint8_t		guid[16];
+	uint64_t	start;
+	uint64_t	last;
+	uint64_t	flags;
+	uint8_t		name[72];
+} GPTPartition;
 
 #pragma pack(pop)
 
@@ -55,7 +82,8 @@ static int
 read_range(int fd, void *dst, off_t offset, size_t size)
 {
 	check(lseek(fd, offset, SEEK_SET) > 0, "Cannot seek on the file\n");
-	return read(fd, dst, size) > 0;
+	check(read(fd, dst, size) > 0, "Cannot read from the disk");
+	return 0;
 }
 
 static int
@@ -141,6 +169,57 @@ parse_mbr_parttable_and_commit(int disk)
 	return mbr_parse_one_table_and_commit(disk, 0, 1) < 0;
 }
 
+/*
+ *	If an error occured, returns -1. Otherwise the sector size.
+ */
+static int
+get_logical_sector_size(int disk)
+{
+	int size = 0;
+	return ioctl(disk, BLKSSZGET, &size) < 0 ? -1 : size;
+}
+
+/*
+ *	TODO: Do CRC32 checksum and more assertions.
+ */
+static int
+parse_gpt_parttable_and_commit(int disk)
+{
+	int secSize = get_logical_sector_size(disk);
+
+	GPTHeader header;
+	read_range(disk, &header, secSize * 1, sizeof(header));
+
+	GPTPartition *parttable;
+	alloc(parttable, sizeof(GPTPartition) * header.partNum);
+	read_range(disk, parttable,
+		   header.parttableStart * secSize,
+		   sizeof(GPTPartition) * header.partNum);
+
+	uint8_t zeros[16] = { 0 };
+
+	for (int i = 0; i < (int32_t)header.partNum; i++) {
+		if (!memcmp(parttable[i].type, zeros, sizeof(zeros)))
+			continue;
+
+		long long int start	= parttable[i].start;
+		long long int size	= parttable[i].last - start;
+
+		printf("part %d: start = %llu, end = %llu\n",
+		       i + 1, start, size);
+
+		int ret = commit_add_partition(disk, i + 1,
+					       start * secSize,
+					       size * secSize);
+		check(!ret,
+		      "Cannot commit partition information to kernel: %s\n",
+		      strerror(errno));
+	}
+
+	free(parttable);
+	return 0;
+}
+
 static int
 parse_partition_table_and_commit(int disk, PartTable_Type type)
 {
@@ -148,6 +227,8 @@ parse_partition_table_and_commit(int disk, PartTable_Type type)
 	      "Cannot delete existing partition information from kernel.\n");
 	if (type == PARTTABLE_MBR) {
 		return parse_mbr_parttable_and_commit(disk);
+	} else if (type == PARTTABLE_GPT) {
+		return parse_gpt_parttable_and_commit(disk);
 	} else {
 		perr("Unsupportd partition table type %d\n", type);
 		return -1;
@@ -160,10 +241,13 @@ probe_partition(const char *path)
 	int disk = open(path, O_RDONLY);
 	check(disk >= 0, "Cannot open disk %s\n", path);
 
+	int sectorSize = get_logical_sector_size(disk);
+	check(sectorSize > 0, "Cannot get the logical size of a sector.\n");
+
 	uint8_t *lba1;
 	alloc(lba1, 512);
 
-	read_range(disk, lba1, 512, 512);
+	read_range(disk, lba1, sectorSize * 1, 512);
 	PartTable_Type type = get_disk_type(lba1);
 	free(lba1);
 
