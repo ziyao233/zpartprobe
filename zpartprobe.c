@@ -144,8 +144,10 @@ mbr_parse_one_table_and_commit(int disk, uint32_t sectorIndex, int partNo)
 		       table[i].startSector + sectorIndex, table[i].sectorNum);
 
 		int ret = commit_add_partition(disk, partNo + i,
-				table[i].startSector * MBR_SECTOR_SIZE,
-				table[i].sectorNum * MBR_SECTOR_SIZE);
+				((long long int)table[i].startSector) *
+					MBR_SECTOR_SIZE,
+				((long long int)table[i].sectorNum) *
+					MBR_SECTOR_SIZE);
 		check(!ret,
 		      "Cannot commit partition information to kernel: %s\n",
 		      strerror(errno));
