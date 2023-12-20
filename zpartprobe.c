@@ -75,14 +75,19 @@ typedef struct {
 	}						\
 } while (0)
 
-#define alloc(name, size) \
-	check(name = malloc(size), "Cannot allocate memory for %s\n", #name)
+#define alloc(name, size) do {\
+	name = malloc(size);						\
+	if (!(name)) {							\
+		perr("Cannot allocate memory for %s\n", #name);		\
+		exit(-1);						\
+	}								\
+} while (0)
 
 static int
 read_range(int fd, void *dst, off_t offset, size_t size)
 {
 	check(lseek(fd, offset, SEEK_SET) > 0, "Cannot seek on the file\n");
-	check(read(fd, dst, size) > 0, "Cannot read from the disk");
+	check(read(fd, dst, size) > 0, "Cannot read from the disk\n");
 	return 0;
 }
 
@@ -212,30 +217,92 @@ get_logical_sector_size(int disk)
 	return size;
 }
 
-/*
- *	TODO: Do CRC32 checksum and more assertions.
- */
+static int
+gpt_get_header(int disk, GPTHeader *header, size_t location)
+{
+	int secSize = get_logical_sector_size(disk);
+	read_range(disk, header, secSize * location, sizeof(GPTHeader));
+	uint32_t chksum = header->headerCRC32;
+	printf("GPT Header checksum: 0x%08x\n", chksum);
+	header->headerCRC32 = 0;
+	uint32_t chksum2 = crc32(header, sizeof(GPTHeader));
+	if (chksum2 != chksum) {
+		perr("GPT Header checksum mismatch! "
+		     "Calculated header checksum: 0x%08x\n", chksum2);
+		return -1;
+	} else {
+		return 0;
+	}
+}
+
+static GPTPartition *
+gpt_get_parttable(int disk, GPTHeader *header)
+{
+	GPTPartition *parttable;
+	alloc(parttable, sizeof(GPTPartition) * header->partNum);
+
+	int secSize = get_logical_sector_size(disk);
+	read_range(disk, parttable, header->parttableStart * secSize,
+		   sizeof(GPTPartition) * header->partNum);
+
+	printf("GPT Table checksum: 0x%08x\n", header->tableCRC32);
+	uint32_t chksum = crc32(parttable,
+				sizeof(GPTPartition) * header->partNum);
+	if (chksum != header->tableCRC32) {
+		perr("Table checksum mismatch! "
+		     "Calculated checksum 0x%08x\n", chksum);
+		free(parttable);
+		return NULL;
+	} else {
+		return parttable;
+	}
+}
+
+static int
+gpt_get_header_and_table(int disk, GPTHeader *header, GPTPartition **parttable)
+{
+	/*	Try the main GPT header	*/
+	if (gpt_get_header(disk, header, 1)) {
+		perr("Try using backup\n");
+		goto tryBackup;
+	}
+
+	*parttable = gpt_get_parttable(disk, header);
+	if (!*parttable) {
+		perr("Try using backup\n");
+		goto tryBackup;
+	}
+
+	return 0;
+
+tryBackup:
+
+	if (gpt_get_header(disk, header, header->backup)) {
+		perr("Backup header corrupted\n");
+		goto err;
+	}
+	*parttable = gpt_get_parttable(disk, header);
+	if (!*parttable) {
+		perr("Backup parttable corrupted\n");
+		goto err;
+	}
+
+	return 0;
+
+err:
+	perr("CORRUPTED GPT TABLE: GOOD LUCK\n");
+	return -1;
+}
+
 static int
 parse_gpt_parttable_and_commit(int disk)
 {
+	GPTHeader header;
+	GPTPartition *parttable;
 	int secSize = get_logical_sector_size(disk);
 
-	GPTHeader header;
-	read_range(disk, &header, secSize * 1, sizeof(header));
-
-	GPTPartition *parttable;
-	alloc(parttable, sizeof(GPTPartition) * header.partNum);
-	read_range(disk, parttable,
-		   header.parttableStart * secSize,
-		   sizeof(GPTPartition) * header.partNum);
-
-	uint32_t chksum = crc32(parttable, sizeof(GPTPartition) * header.partNum);
-	printf("Partition table CRC32 checksum: 0x%08x\n", chksum);
-	if (chksum != header.tableCRC32) {
-		perr("checksum mismatch! header checksum: 0x%08x\n",
-		     header.tableCRC32);
+	if (gpt_get_header_and_table(disk, &header, &parttable))
 		return -1;
-	}
 
 	uint8_t zeros[16] = { 0 };
 
