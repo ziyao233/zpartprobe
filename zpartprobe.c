@@ -171,14 +171,45 @@ parse_mbr_parttable_and_commit(int disk)
 	return mbr_parse_one_table_and_commit(disk, 0, 1) < 0;
 }
 
+uint32_t
+crc32_reflect(uint32_t word)
+{
+	uint32_t r = 0;
+	for (int i = 0; i < 32; i++)
+		r |= !!(word & (1 << (31 - i))) << i;
+	return r;
+}
+
+uint32_t
+crc32(const void *p, size_t size)
+{
+	const uint8_t *data = p;
+	uint32_t r = 0xffffffff;
+	for (size_t i = 0; i < size; i++) {
+		r ^= crc32_reflect(data[i]);
+		for (int j = 0; j < 8; j++)
+			r = (r & (1 << 31)) ? (r << 1) ^ 0x04C11DB7 : (r << 1);
+	}
+	return crc32_reflect(r ^ 0xffffffff);
+}
+
 /*
  *	If an error occured, returns -1. Otherwise the sector size.
  */
 static int
 get_logical_sector_size(int disk)
 {
-	int size = 0;
-	return ioctl(disk, BLKSSZGET, &size) < 0 ? -1 : size;
+	static int warned = 0;
+	int size = ioctl(disk, BLKSSZGET, &size);
+	if (size < 0) {
+		if (!warned) {
+			perr("Cannot get logical sector size, "
+			     "set to 512 by default\n");
+			warned = 1;
+		}
+		size = 512;
+	}
+	return size;
 }
 
 /*
@@ -197,6 +228,14 @@ parse_gpt_parttable_and_commit(int disk)
 	read_range(disk, parttable,
 		   header.parttableStart * secSize,
 		   sizeof(GPTPartition) * header.partNum);
+
+	uint32_t chksum = crc32(parttable, sizeof(GPTPartition) * header.partNum);
+	printf("Partition table CRC32 checksum: 0x%08x\n", chksum);
+	if (chksum != header.tableCRC32) {
+		perr("checksum mismatch! header checksum: 0x%08x\n",
+		     header.tableCRC32);
+		return -1;
+	}
 
 	uint8_t zeros[16] = { 0 };
 
@@ -244,7 +283,6 @@ probe_partition(const char *path)
 	check(disk >= 0, "Cannot open disk %s\n", path);
 
 	int sectorSize = get_logical_sector_size(disk);
-	check(sectorSize > 0, "Cannot get the logical size of a sector.\n");
 
 	uint8_t *lba1;
 	alloc(lba1, 512);
