@@ -9,6 +9,7 @@
 #include<stdlib.h>
 #include<stdint.h>
 #include<string.h>
+#include<stdarg.h>
 
 #include<errno.h>
 #include<fcntl.h>
@@ -16,6 +17,10 @@
 #include<sys/ioctl.h>
 #include<linux/blkpg.h>
 #include<linux/fs.h>
+
+#ifndef ZPARTPROBE_VERSION
+#define ZPARTPROBE_VERSION __DATE__ " built"
+#endif
 
 #define MBR_SECTOR_SIZE 512
 #define MBR_PART_TYPE_UNUSED	0x00
@@ -83,6 +88,33 @@ typedef struct {
 	}								\
 } while (0)
 
+int gDoSummary, gDoCommit = 1, gVerbose;
+
+#define printf_like \
+va_list va;		\
+va_start(va, fmt);	\
+vprintf(fmt, va);	\
+va_end(va);		\
+return;
+
+static void
+verbose(const char *fmt, ...)
+{
+	if (!gVerbose)
+		return;
+
+	printf_like
+}
+
+static void
+summary(const char *fmt, ...)
+{
+	if (!gDoSummary)
+		return;
+
+	printf_like
+}
+
 static int
 read_range(int fd, void *dst, off_t offset, size_t size)
 {
@@ -101,6 +133,9 @@ get_disk_type(const uint8_t *lba1)
 static int
 commit_clear_partitions(int disk)
 {
+	if (!gDoCommit)
+		return 0;
+
 	// There should be no more than 128 partitions, right?
 	// ...right?
 	struct blkpg_partition part = { .pno		= 1 };
@@ -120,6 +155,9 @@ commit_clear_partitions(int disk)
 static int
 commit_add_partition(int disk, int no, long long int start, long long int size)
 {
+	if (!gDoCommit)
+		return 0;
+
 	struct blkpg_partition part = {
 					.pno	= no,
 					.start	= start,
@@ -144,9 +182,9 @@ mbr_parse_one_table_and_commit(int disk, uint32_t sectorIndex, int partNo)
 		if (table[i].type == MBR_PART_TYPE_UNUSED)
 			continue;
 
-		printf("part %d: start = %u, num = %u\n",
-		       i + partNo,
-		       table[i].startSector + sectorIndex, table[i].sectorNum);
+		summary("part %d: start = %u, num = %u\n",
+		        i + partNo,
+		        table[i].startSector + sectorIndex, table[i].sectorNum);
 
 		int ret = commit_add_partition(disk, partNo + i,
 				((long long int)table[i].startSector) *
@@ -223,7 +261,7 @@ gpt_get_header(int disk, GPTHeader *header, size_t location)
 	int secSize = get_logical_sector_size(disk);
 	read_range(disk, header, secSize * location, sizeof(GPTHeader));
 	uint32_t chksum = header->headerCRC32;
-	printf("GPT Header checksum: 0x%08x\n", chksum);
+	verbose("GPT Header checksum: 0x%08x\n", chksum);
 	header->headerCRC32 = 0;
 	uint32_t chksum2 = crc32(header, sizeof(GPTHeader));
 	if (chksum2 != chksum) {
@@ -245,7 +283,7 @@ gpt_get_parttable(int disk, GPTHeader *header)
 	read_range(disk, parttable, header->parttableStart * secSize,
 		   sizeof(GPTPartition) * header->partNum);
 
-	printf("GPT Table checksum: 0x%08x\n", header->tableCRC32);
+	verbose("Table checksum: 0x%08x\n", header->tableCRC32);
 	uint32_t chksum = crc32(parttable,
 				sizeof(GPTPartition) * header->partNum);
 	if (chksum != header->tableCRC32) {
@@ -313,8 +351,8 @@ parse_gpt_parttable_and_commit(int disk)
 		long long int start	= parttable[i].start;
 		long long int size	= parttable[i].last - start;
 
-		printf("part %d: start = %llu, end = %llu\n",
-		       i + 1, start, size);
+		summary("part %d: start = %llu, end = %llu\n",
+		        i + 1, start, size);
 
 		int ret = commit_add_partition(disk, i + 1,
 					       start * secSize,
@@ -365,10 +403,57 @@ probe_partition(const char *path)
 	return 0;
 }
 
-int
-main(int argc, const char *argv[])
+void
+print_help(void)
 {
-	for (int i = 1; i < argc; i++) {
+	puts("zpartprobe: Ziyao's Partprobe");
+	puts("Probing partitions on a disk and commit them to the kernel\n");
+	puts("Usage:");
+	puts("\tzpartprobe [OPTIONS] <DISK1> [DISK2] ...\n");
+	puts("Options:");
+	puts("\t-s\tPrint a summary of partitions");
+	puts("\t-d\tDry run, do not commit information to the kernel");
+	puts("\t-h\tPrint this help");
+	puts("\t-v\tPrint version");
+	puts("\t-V\tBe verbose");
+	return;
+}
+
+void
+print_version(void)
+{
+	puts(ZPARTPROBE_VERSION);
+	return;
+}
+
+int
+main(int argc, char * const argv[])
+{
+	int opt;
+	while ((opt = getopt(argc, argv, "sdhvV")) != -1) {
+		switch (opt) {
+		case 's':
+			gDoSummary = 1;
+			break;
+		case 'd':
+			gDoCommit = 0;
+			break;
+		case 'h':
+			print_help();
+			return 0;
+		case 'v':
+			print_version();
+			return 0;
+		case 'V':
+			gVerbose = 1;
+			break;
+		default:
+			print_help();
+			return -1;
+		}
+	}
+
+	for (int i = optind; i < argc; i++) {
 		if (probe_partition(argv[i]))
 			return -1;
 	}
