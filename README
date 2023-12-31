@@ -1,0 +1,29 @@
+--------------------------------------------------------------------------------
+
+		zpartprobe: Ziyao's Partprobe
+
+--------------------------------------------------------------------------------
+
+= Introdutction
+
+This is a simple implementation of partprobe, as busybox's partprobe does not
+support all kind of devices.
+
+== Build
+
+You need a C99-compatible compiler, this program runs only on Linux-based
+platforms.
+
+Running
+
+	./build.sh [release]
+
+for building. With release argument attached, no debug symbols will be included
+and optimization will be disabled, resulting in a binary suitable for releasing.
+
+== License
+
+Copyright (c) 2023 Yao Zi <ziyao@disroot.org>. All rights reserved.
+
+zpartprobe is distributed under Mozilla Public License Version 2.0. Refer to
+/LICENSE for more information.
