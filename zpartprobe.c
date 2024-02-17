@@ -2,7 +2,7 @@
  *	zpartprobe
  *	/zpartprobe.c
  *	By Mozilla Public License Version 2.0
- *	Copyright (c) 2023 Yao Zi. All rights reserved.
+ *	Copyright (c) 2023-2024 Yao Zi. All rights reserved.
  */
 
 #include<stdio.h>
@@ -118,7 +118,7 @@ summary(const char *fmt, ...)
 static int
 read_range(int fd, void *dst, off_t offset, size_t size)
 {
-	check(lseek(fd, offset, SEEK_SET) > 0, "Cannot seek on the file\n");
+	check(lseek(fd, offset, SEEK_SET) >= 0, "Cannot seek on the file\n");
 	check(read(fd, dst, size) > 0, "Cannot read from the disk\n");
 	return 0;
 }
@@ -243,8 +243,8 @@ static int
 get_logical_sector_size(int disk)
 {
 	static int warned = 0;
-	int size = ioctl(disk, BLKSSZGET, &size);
-	if (size < 0) {
+	int size;
+	if (ioctl(disk, BLKSSZGET, &size) < 0) {
 		if (!warned) {
 			perr("Cannot get logical sector size, "
 			     "set to 512 by default\n");
