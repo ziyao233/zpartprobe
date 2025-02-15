@@ -352,7 +352,7 @@ parse_gpt_parttable_and_commit(int disk)
 		long long int size	= parttable[i].last - start;
 
 		summary("part %d: start = %llu, end = %llu\n",
-		        i + 1, start, size);
+		        i + 1, start, parttable[i].last);
 
 		int ret = commit_add_partition(disk, i + 1,
 					       start * secSize,
